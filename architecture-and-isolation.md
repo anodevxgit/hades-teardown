@@ -1,6 +1,6 @@
 # Hades Sandbox — Architecture & Isolation Analysis
 
-> Part 1 of 2. Companion document: [`03-findings-and-pocs.md`](./03-findings-and-pocs.md).
+> Part 1 of 2. Companion document: [`findings-and-pocs.md`](./findings-and-pocs.md).
 
 | | |
 |---|---|
@@ -56,12 +56,14 @@ Built in `buildkitsandbox`, x86_64, no loadable modules (`/lib/modules` absent �
 
 ### 3.2 Boot parameters
 
+```
 console=hvc0 quiet loglevel=3 root=/dev/vda rootfstype=erofs ro
 init=/hades-container-tools/catatonit
 /hades-charon/xai-hades-charon init
 {"network":{"ip":"172.16.0.2/24","default_route":"172.16.0.1",
 "nameserver":"172.16.0.3","hostname":"hades-vm"},
 "host_aliases":[],"work_disk_device":"/dev/vdb","format_work_disk":false}
+```
 Notes:
 - `console=hvc0` → virtio-console, confirms virtualised serial.
 - `catatonit` as PID 1 → init shim, container-shaped process tree inside a VM.
@@ -70,16 +72,19 @@ Notes:
 - Guest CID is implicit; host side is CID 2.
 
 ### 3.3 Block & character devices
+```
 254:0 vda 52 MB erofs, guest rootfs, read-only
 254:16 vdb 20 GB work disk, overlay upper backing
 254:32 vdc 16 GB Ubuntu rootfs, app + tooling
 254:48 vdd 1.9 MB erofs, /.hades-container-tools, read-only
 252:0 nullb0 250 GB null_blk device
+```
 Also present: `kvm`, `fuse`, `loop-control`, `loop0-7`, `mem`, `/dev/vsock`.
 
 `vda` and `vdd` are erofs images (compressed, read-only) — immutable by design. `vdc` is a full writable Ubuntu userland. `nullb0` is a 250 GB null_blk volume, useful as scratch.
 
 ### 3.4 Mount table
+```
 overlay / overlay rw,lowerdir=/container/root-ro,
 upperdir=/work/container-root-overlay-upper,workdir=/work/container-root-overlay-work
 proc /proc proc rw,nosuid,nodev,noexec
@@ -88,16 +93,19 @@ sysfs /sys sysfs ro,nosuid,nodev,noexec
 cgroup /sys/fs/cgroup cgroup2 rw,nosuid,nodev,noexec
 /dev/vdd /.hades-container-tools erofs ro
 grok-files /home/workdir/artifacts fuse rw,nosuid,nodev,allow_other
+```
 `/container/root-ro`, `/work/container-root-overlay-*` are **host paths** referenced by the overlay but not mounted into the guest namespace — the overlay is assembled host-side. `grok-files` is a FUSE mount served by the host, the artifact egress channel.
 
 `/dev/shm` is capped at 64 MB — tight for anything memory-backed.
 
 ### 3.5 Capabilities, seccomp, LSM
+```
 CapInh/Prm/Eff/Bnd/Amb: 000001ffffffffff (full set)
 Seccomp: 2 Seccomp_filters: 1
 NoNewPrivs: 1
 securebits: no-new-privs=1
 uid=0 euid=0 gid=0
+```
 Full capability set including `CAP_SYS_ADMIN`, `CAP_SYS_MODULE`, `CAP_SYS_PTRACE`, `CAP_BPF`, `CAP_CHECKPOINT_RESTORE`. Bounding set matches, so nothing is droppable-only.
 
 `NoNewPrivs=1` blocks setuid-based escalation — irrelevant here since the process is already `uid=0`. One seccomp filter is installed; syscall-level filtering is coarse.
@@ -105,16 +113,20 @@ Full capability set including `CAP_SYS_ADMIN`, `CAP_SYS_MODULE`, `CAP_SYS_PTRACE
 No AppArmor or SELinux label applied to the workload.
 
 ### 3.6 Network
+```
 eth0 default via 172.16.0.1
 eth0 172.16.0.2/24
 lo 127.0.0.0/8
 resolv.conf: nameserver 172.16.0.3
+```
 
 `172.16.0.1` and `172.16.0.3` are the VM gateway and resolver — **not** docker bridge addresses. No `ip`/`ss`/`ifconfig` in the guest; mapping done via `/proc/net/route`, `getifaddrs`, `/proc/net/tcp`.
 
 Port sweep against `172.16.0.1`, `172.16.0.3`, `172.17.0.1` — 22/80/443/5432/6379/8000/8080/8888/9200/2375/2376/11211/27017:
+```
 172.16.0.3:53 OPEN (resolver)
 everything else closed/timeout
+```
 
 
 No container runtime API, no sidecar database, no metadata proxy on the gateway. Egress to the internet is permitted (`200` from an external IP echo), so the guest is NAT'd outbound.
@@ -122,7 +134,9 @@ No container runtime API, no sidecar database, no metadata proxy on the gateway.
 ### 3.7 DNS
 
 `172.16.0.3` resolves `*.svc.cluster.local`:
+```
 10.236.16.1 kubernetes.default.svc.cluster.local
+```
 Namespace `hades-openbar` is inferable from `COINGECKO_BASE_URL`, which points at `coingecko-proxy.hades-openbar.svc.cluster.local`. Cluster DNS is a free topology oracle from inside the guest.
 
 ### 3.8 Cloud metadata
@@ -154,6 +168,7 @@ All four paths fail:
 | `/dev/vda` (Alpine rootfs) | — | busybox userland, `/etc/passwd`, `hades-charon` dir. |
 
 Charon strings reveal the control-plane RPC surface and its error taxonomy, which is effectively a feature list:
+```
 HADES_GCSFUSE_MOUNT_PATH_NOT_WHITELISTED
 HADES_DISK_SNAPSHOT_NOT_ALLOWED
 HADES_DISK_REGISTRY_NOT_WHITELISTED
@@ -162,6 +177,7 @@ HADES_API_KEY_NOT_WHITELISTED_FOR_INSTANCE
 HADES_PODMAN_PULL_FAILED
 HADES_RUNC_NOT_ALLOWED
 HADES_GVISOR_NOT_ALLOWED
+```
 Implications: charon exposes VM lifecycle, snapshot, gcsfuse mount, and podman image pull. Each is gated by a whitelist or per-instance API key. **The whitelists are the attack surface** — an allowlist check that accepts a path or registry the guest supplies is a bypass candidate.
 
 Additional strings show a `styx-open-to` socket handshake and a full `pivot_root` sequence (`/vm-tools/rw_root`, `/vm-tools/ro_root`), confirming charon is the component that assembles the guest root and pivots into it.
@@ -185,7 +201,7 @@ Additional strings show a `styx-open-to` socket handshake and a full `pivot_root
 | **Token lifetime** | 3600s vs ~300s VM | **Fails** — outlives the VM |
 | Root filesystem | overlay, full caps | **Fails by design** — `uid=0`, writable overlay |
 
-Six of thirteen boundaries fail. Every failure is at the **application** layer; none is at the hypervisor layer.
+Five of twelve boundaries fail. Every failure is at the **application** layer; none is at the hypervisor layer.
 
 ---
 
@@ -220,6 +236,7 @@ Recorded so they are not re-litigated:
 ## Appendix A — raw output
 
 Sanitized excerpts. Full capture retained privately.
+```
 $ capsh --print
 Current: =eip
 Bounding set =cap_chown,...,cap_sys_admin,cap_sys_module,cap_sys_ptrace,
@@ -241,4 +258,5 @@ ConnectionResetError: [Errno 104] Connection reset by peer
 
 $ getent hosts kubernetes.default.svc.cluster.local
 10.236.16.1 kubernetes.default.svc.cluster.local
+```
 
