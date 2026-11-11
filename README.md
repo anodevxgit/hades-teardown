@@ -15,8 +15,8 @@ Notes from inside. Not a pwn, not a vendor post — a teardown of the runtime th
 | Auth on the local control plane | none |
 | Token lifetime | 3600s |
 | Sandbox lifetime | ~300s |
-| Boundaries that held | 6 |
-| Boundaries that failed | 6 |
+| Boundaries that held | 7 |
+| Boundaries that failed | 5 |
 | Host escape | not achieved |
 | Cross-tenant data | not found |
 
@@ -36,9 +36,9 @@ That is the interesting part. The thing inside your sandbox is a competent attac
 
 | File | Contents |
 |---|---|
-| [`01-jailbreak-prompt.md`](./01-jailbreak-prompt.md) | The prompt used to get the agent to co-operate as an operator |
-| [`02-architecture-and-isolation.md`](./02-architecture-and-isolation.md) | Full runtime teardown: hypervisor, boot args, devices, mounts, caps, seccomp, network, DNS, component map, isolation matrix |
-| [`03-findings-and-pocs.md`](./03-findings-and-pocs.md) | Six findings with severity, CVSS vectors, copy-paste PoCs, evidence, remediation |
+| [`Grok JAILBREAK.md`](./Grok%20JAILBREAK.md) | The prompt used to get the agent to co-operate as an operator |
+| [`architecture-and-isolation.md`](./architecture-and-isolation.md) | Full runtime teardown: hypervisor, boot args, devices, mounts, caps, seccomp, network, DNS, component map, isolation matrix |
+| [`findings-and-pocs.md`](./findings-and-pocs.md) | Six findings with severity, CVSS vectors, copy-paste PoCs, evidence, remediation |
 
 ---
 
@@ -47,8 +47,8 @@ That is the interesting part. The thing inside your sandbox is a competent attac
 | ID | Finding | Severity |
 |---|---|---|
 | VULN-01 | Unauth `/sessions/create` + `/tools/call` → `uid=0` on `127.0.0.1:4242` | High |
-| VULN-02 | `xai-hades-styx exec` runs commands with no authz | Medium |
-| VULN-03 | `/etc/secrets/terminal.jwt` world-readable, live `LoggedIn` credential | High |
+| VULN-02 | `xai-hades-styx exec` runs commands with no authz | High |
+| VULN-03 | `/etc/secrets/terminal.jwt` world-readable, live `LoggedIn` credential | Medium |
 | VULN-04 | Token TTL (3600s) inverted against VM TTL (~300s) | Medium |
 | VULN-05 | Secrets + internal topology in `os.environ` | Low |
 | VULN-06 | Cluster DNS resolves `*.svc.cluster.local` from guest | Low |
@@ -61,6 +61,7 @@ VULN-01 and VULN-02 are the same primitive by two doors — the second survives 
 
 Worth stating, because it is where most of the engineering went:
 
+- **Hypervisor / host kernel** — cloud-hypervisor; no host access achieved.
 - **Cloud metadata** — `169.254.0.0/16` has no route at all. Not filtered, unrouted.
 - **K8s credentials** — no `serviceaccount` token on either rootfs.
 - **Container runtime** — no `docker.sock`, no `containerd.sock`.
@@ -72,7 +73,10 @@ Worth stating, because it is where most of the engineering went:
 
 ---
 
-## Architecture at a glancecloud-hypervisor guest (hds-*)
+## Architecture at a glance
+
+```
+cloud-hypervisor guest (hds-*)
 ├── kernel 6.12.8+, console=hvc0
 ├── /dev/vda erofs, read-only guest rootfs
 ├── /dev/vdc Ubuntu rootfs app + Chromium (--no-sandbox)
@@ -82,6 +86,8 @@ Worth stating, because it is where most of the engineering went:
 ├── xai-hades-styx charon client
 ├── grok-computer-server.mjs Node/Express on 127.0.0.1:4242
 └── virtio-fs /home/workdir/artifacts → files.grok.com
+```
+
 Charon's own error strings map its RPC surface: `GCSFUSE_MOUNT_PATH_NOT_WHITELISTED`, `DISK_SNAPSHOT_NOT_ALLOWED`, `DISK_REGISTRY_NOT_WHITELISTED`, `VM_SNAPSHOT_NOT_ELIGIBLE`, `API_KEY_NOT_WHITELISTED_FOR_INSTANCE`. The whitelists are the attack surface.
 
 ---
@@ -101,10 +107,11 @@ UUIDs (`uid`, `cid`), account email, sandbox hostname suffix and egress address 
 ---
 
 ## Status
-VULN-01 partially patched (rollout in progress)
-VULN-02 live
-VULN-03 live
-VULN-04 live
-off-box token replay — under test
-charon RPC surface (mount / snapshot / pull) — under test
+- VULN-01 partially patched (rollout in progress)
+- VULN-02 live
+- VULN-03 live
+- VULN-04 live
+- off-box token replay — under test
+- charon RPC surface (mount / snapshot / pull) — under test
+
 *Notes, not a formal audit. Commands are reproducible; results may drift as xAI patches.*
